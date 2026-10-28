@@ -2,15 +2,18 @@
 import { h, icon, btn, toast, fmtTime } from '../ui.js';
 import { importFile } from '../media.js';
 import { addMediaToTimeline } from '../actions.js';
-import { createRecorder, stopStream, extFor } from '../recorder.js';
+import { createRecorder, stopStream, extFor, levelMeter } from '../recorder.js';
 
 export function render(root) {
-  let mode = 'camera', stream, camStream, recorder, recording = false, t0, raf, composeStop;
+  let mode = 'camera', stream, camStream, recorder, recording = false, t0, raf, composeStop, meterStop;
   const video = h('video', { class: 'rec-preview', autoplay: true, muted: true, playsInline: true });
   const placeholder = h('div', { class: 'rec-placeholder' }, icon('camera', 28), h('span', null, 'Elige una fuente y pulsa "Activar"'));
   const stage = h('div', { class: 'rec-stage' }, placeholder, video);
   const timer = h('span', { class: 'rec-timer' }, '0:00.00');
   const micToggle = h('input', { type: 'checkbox', checked: true });
+  const sysToggle = h('input', { type: 'checkbox', checked: true });
+  const meter = h('div', { class: 'meter' }, h('i'));
+  const audioInfo = h('small', { class: 'muted' }, 'Sin audio');
 
   const modes = h('div', { class: 'rec-modes' }, [['camera', 'camera', 'Cámara'], ['screen', 'monitor', 'Pantalla'], ['both', 'record', 'Pantalla + cámara']].map(([k, ic, l]) =>
     h('button', { type: 'button', class: `rec-mode${k === mode ? ' on' : ''}`, onclick: (e) => { if (recording) return; mode = k; modes.querySelectorAll('.on').forEach((x) => x.classList.remove('on')); e.currentTarget.classList.add('on'); release(); } }, icon(ic, 20), h('span', null, l))));
@@ -19,8 +22,9 @@ export function render(root) {
   const recBtn = btn('Empezar a grabar', { icon: 'dot', cls: 'danger full', onClick: toggleRec, disabled: true });
 
   function release() {
-    stopStream(stream); stopStream(camStream); composeStop?.();
-    stream = camStream = null; composeStop = null;
+    stopStream(stream); stopStream(camStream); composeStop?.(); meterStop?.();
+    stream = camStream = null; composeStop = null; meterStop = null;
+    audioInfo.textContent = 'Sin audio';
     video.srcObject = null;
     placeholder.classList.remove('hidden');
     recBtn.disabled = true;
@@ -32,7 +36,16 @@ export function render(root) {
       if (mode === 'camera') {
         stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: micToggle.checked });
       } else {
-        const scr = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+        const wantSys = sysToggle.checked;
+        const scr = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: 30 },
+          audio: wantSys ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
+          systemAudio: wantSys ? 'include' : 'exclude',
+          surfaceSwitching: 'include',
+        });
+        if (wantSys && !scr.getAudioTracks().length) {
+          toast('No se está grabando el sonido de la pantalla. Al compartir, marca "Compartir audio del sistema" (pantalla completa) o "Compartir audio de la pestaña". Las ventanas sueltas no comparten audio.', 'error', 9000);
+        }
         let mic = null;
         if (micToggle.checked) { try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { /* sin mic */ } }
         if (mode === 'both') { try { camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } }); } catch { toast('No se pudo abrir la cámara', 'error'); } }
@@ -41,6 +54,9 @@ export function render(root) {
       }
       video.srcObject = stream;
       placeholder.classList.add('hidden');
+      const nA = stream.getAudioTracks().length;
+      audioInfo.textContent = nA ? 'Audio activo' : 'Sin audio';
+      if (nA) meterStop = levelMeter(new MediaStream(stream.getAudioTracks()), meter);
       recBtn.disabled = false;
     } catch (e) {
       console.error(e);
@@ -75,7 +91,9 @@ export function render(root) {
     const out = c.captureStream(30);
     const audios = [...scr.getAudioTracks(), ...(mic?.getAudioTracks() || [])];
     if (audios.length > 1) {
+      // Mezcla audio del sistema + micrófono. El AudioContext nace suspendido fuera de un clic: hay que reanudarlo.
       const ac = new AudioContext();
+      ac.resume().catch(() => {});
       const dest = ac.createMediaStreamDestination();
       for (const tr of audios) ac.createMediaStreamSource(new MediaStream([tr])).connect(dest);
       out.addTrack(dest.stream.getAudioTracks()[0]);
@@ -89,6 +107,7 @@ export function render(root) {
 
   async function toggleRec() {
     if (!recording) {
+      if (!stream.getAudioTracks().length) toast('Grabando sin audio', 'info');
       recorder = createRecorder(stream, 'video');
       recorder.start();
       recording = true;
@@ -115,6 +134,8 @@ export function render(root) {
 
   root.append(modes, stage,
     h('div', { class: 'row between rec-bar' }, h('label', { class: 'ctl-toggle inline' }, h('span', { class: 'switch' }, micToggle, h('i')), h('span', null, 'Micrófono')), timer),
+    h('div', { class: 'row between rec-bar' }, h('label', { class: 'ctl-toggle inline' }, h('span', { class: 'switch' }, sysToggle, h('i')), h('span', null, 'Sonido de la pantalla')), audioInfo),
+    meter,
     startBtn, recBtn,
-    h('p', { class: 'hint' }, 'Todo se graba en tu equipo. Al detener, el video se añade a tus archivos y a la línea de tiempo.'));
+    h('p', { class: 'hint' }, 'Para grabar el sonido de la pantalla, marca "Compartir audio" en la ventana del navegador al elegir qué compartir (pestaña o pantalla completa). Todo se graba en tu equipo y se añade a la línea de tiempo al detener.'));
 }
